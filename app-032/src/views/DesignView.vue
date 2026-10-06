@@ -3,17 +3,25 @@ import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import LanternPreview from '../components/LanternPreview.vue'
 import ChecksPanel from '../components/ChecksPanel.vue'
+import PositionBanner from '../components/PositionBanner.vue'
 import { getLantern, distributeLayers, syncLayerDiameters } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { buildGeometry, polyhedronInfo, r1 } from '../core/geometry'
 import { COVERINGS, CRAFT, coveringSpec, kindLabel } from '../core/craft'
 import { diameterFromPerimeter, diameterFromRib } from '../core/checks'
+import { positionPolicyOf } from '../core/position'
 import type { Lantern, Panel } from '../core/types'
 
 const route = useRoute()
 const lantern = computed(() => getLantern(route.params.id as string))
 const mode = ref<'front' | 'top' | 'iso'>('front')
+/** 表↔图联动：当前选中的位置身份键 */
+const selectedKey = ref<string | null>(null)
+
+function onSelectKey(key: string | null) {
+  selectedKey.value = key
+}
 
 const loft = computed(() => ({
   ...DEFAULT_LOFT_OPTIONS,
@@ -88,6 +96,27 @@ function setSides(e: Event) {
   l.sides = Math.max(3, Math.min(l.kind === 'revolution' ? 24 : 12, Math.round(Number((e.target as HTMLInputElement).value) || 3)))
 }
 
+/** 无层无棱构件定位路线：改路线会让旧存档位置/已发单据/已裁料作废，需明确确认 */
+function setPolicy(e: Event) {
+  const l = lantern.value
+  if (!l) return
+  const v = (e.target as HTMLSelectElement).value as Lantern['positionPolicy']
+  if (v === positionPolicyOf(l)) return
+  const ok = window.confirm(
+    '把无层无棱构件（上口圈/底盘圈/中轴/辐条/支撑篾）改为「按最近层棱折算」后：\n' +
+      '· 这几根在图上能落到位置，但层数或棱数一改位置就会挪；\n' +
+      '· 已存进本机存档的位置、据此导出的构件清单与 1:1 放样图全部作废重出；\n' +
+      '· 照旧位置描过线、裁好的那几根料要退回重新对位。\n\n确定切换吗？'
+  )
+  if (!ok) {
+    // 还原 select 显示
+    ;(e.target as HTMLSelectElement).value = positionPolicyOf(l)
+    return
+  }
+  l.positionPolicy = v
+  selectedKey.value = null
+}
+
 // ---- 尺寸反推（§5） ----
 const ribInput = ref(700)
 const ringInput = ref(1000)
@@ -114,6 +143,9 @@ function applyDiameter(v: number) {
 }
 
 const panelsPreview = computed<Panel[]>(() => full.value?.panels.panels.slice(0, 4) || [])
+
+/** 图上点选当前对应的那根构件（与表同一身份键） */
+const selectedMember = computed(() => full.value?.frame.members.find((m) => m.pos.key === selectedKey.value) || null)
 
 function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
   const l = lantern.value
@@ -286,6 +318,18 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
       </table>
       <small class="hint">分段高之和 = 总高 {{ lantern.totalHeightMm }}mm；直径由收口曲线自动推算。</small>
 
+      <h3>无层无棱构件定位（上口圈 / 底盘圈 / 中轴 / 辐条 / 支撑篈）</h3>
+      <div class="field">
+        <label>定位路线</label>
+        <select :value="positionPolicyOf(lantern)" @change="setPolicy">
+          <option value="tier">统一归「无层无棱档」（表与图好认；代价：这几根图上落不到具体位置）</option>
+          <option value="nearest">按最靠近的层与棱折算（图上能描出；代价：层数/棱数一改位置就挪，旧单据图纸作废）</option>
+        </select>
+        <small>
+          当前路线：{{ positionPolicyOf(lantern) === 'tier' ? '无层无棱档——位置稳定，改层棱数也不挪' : '就近折算——能落图，但层/棱数变更即作废重出' }}
+        </small>
+      </div>
+
       <h3>批量制灯</h3>
       <div class="row">
         <div class="field">
@@ -320,6 +364,7 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
     </section>
 
     <section class="viewer">
+      <PositionBanner :lantern="lantern" />
       <div class="tabs">
         <button :class="{ on: mode === 'front' }" @click="mode = 'front'">正视图</button>
         <button :class="{ on: mode === 'top' }" @click="mode = 'top'">俯视图</button>
@@ -332,9 +377,25 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
           :lantern="lantern"
           :mode="mode"
           interactive
+          :members="full ? full.frame.members : []"
+          :selected-key="selectedKey"
+          selectable
           @update-ctrl="onCtrl"
+          @select="onSelectKey"
         />
       </div>
+
+      <p v-if="selectedMember" class="sel-line">
+        已选：<b>{{ selectedMember.label }}</b> · {{ selectedMember.pos.positionText }}
+        <template v-if="selectedMember.pos.anchorMm">
+          · 坐标 x{{ selectedMember.pos.anchorMm.x }}/y{{ selectedMember.pos.anchorMm.y }}/z{{ selectedMember.pos.anchorMm.z }}mm
+          （{{ (selectedMember.pos.anchorMm.x / 10).toFixed(1) }}/{{ (selectedMember.pos.anchorMm.y / 10).toFixed(1) }}/{{
+            (selectedMember.pos.anchorMm.z / 10).toFixed(1)
+          }}cm）
+        </template>
+        <template v-else> · 无层无棱档，图上不落具体坐标</template>
+        <button class="clear-sel" @click="selectedKey = null">取消选中</button>
+      </p>
 
       <div v-if="full" class="stats">
         <div class="stat"><span>构件总数</span><b>{{ full.frame.totalQty }}</b></div>
@@ -597,6 +658,21 @@ button:hover {
 .canvas {
   height: 440px;
   padding: 8px;
+}
+
+.sel-line {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: #f6e3ba;
+  border: 1px solid #e0c78a;
+  border-radius: 8px;
+}
+
+.clear-sel {
+  margin-left: 10px;
+  padding: 2px 10px;
 }
 
 .stats {

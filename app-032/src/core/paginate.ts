@@ -4,7 +4,7 @@
  * 且带对位十字与拼接编号，并标注重叠搭接量。
  */
 import type { FrameMember, Lantern, Panel } from './types'
-import { buildFrame } from './frame'
+import { buildFrame, stripPatterns, type StripPattern } from './frame'
 import { buildPanels } from './panels'
 
 export type PaperSize = 'A4' | 'A3'
@@ -34,6 +34,8 @@ export interface SheetItemPanel {
 export interface SheetItemStrip {
   type: 'strip'
   member: FrameMember
+  /** 所属放样模板（同尺寸多根共用一份图） */
+  pattern: StripPattern
   xMm: number
   yMm: number
   /** 本段绘制长度（1:1，mm） */
@@ -186,7 +188,9 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
   if (opts.includeStrips) {
     const usable = contentW - STRIP_GUTTER - 4
     const overlap = Math.max(0, opts.overlapMm)
-    for (const m of buildFrame(l).members) {
+    // 同尺寸构件合并为一份放样模板（如 n 根等长竖篾），模板上注明截取根数与各自位置
+    for (const pat of stripPatterns(buildFrame(l).members)) {
+      const m = pat.member
       const total = m.lengthMm
       const advanceMm = Math.max(10, usable - overlap)
       const segCount = total <= usable + EPS ? 1 : Math.ceil((total - overlap) / advanceMm)
@@ -200,6 +204,7 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
         cur.items.push({
           type: 'strip',
           member: m,
+          pattern: pat,
           xMm: cx + STRIP_GUTTER,
           yMm: cy,
           lengthMm: len,
@@ -216,17 +221,17 @@ export function paginate(l: Lantern, opts: LoftOptions): Sheet[] {
     }
   }
 
-  // 回填相邻段编号（拼接方向提示）
-  const byMember = new Map<string, SheetItemStrip[]>()
+  // 回填相邻段编号（拼接方向提示），按模板各自连续
+  const byPattern = new Map<string, SheetItemStrip[]>()
   for (const s of sheets) {
     for (const it of s.items) {
       if (it.type !== 'strip') continue
-      const arr = byMember.get(it.member.id) || []
+      const arr = byPattern.get(it.pattern.patternKey) || []
       arr.push(it)
-      byMember.set(it.member.id, arr)
+      byPattern.set(it.pattern.patternKey, arr)
     }
   }
-  for (const arr of byMember.values()) {
+  for (const arr of byPattern.values()) {
     arr.sort((a, b) => a.segIndex - b.segIndex)
     arr.forEach((it, i) => {
       if (arr[i - 1]) it.prevTag = arr[i - 1].tag

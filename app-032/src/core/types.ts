@@ -1,5 +1,7 @@
 /** 花灯放样数据模型（对齐规格书 §7，并补充放样所需的展开参数） */
 
+import type { MemberPosition } from './position'
+
 export type LanternKind = 'prism' | 'revolution' | 'polyhedron' | 'box'
 export type MouthStyle = 'flat' | 'taper' | 'gourd'
 export type Covering = 'xuan' | 'silk' | 'parchment'
@@ -63,6 +65,17 @@ export interface Lantern {
   pageSize: PageSize
   /** 长条图跨页搭接量（mm） */
   overlapMm: number
+  /**
+   * 无层无棱构件（上口圈/底盘圈/中轴/辐条/支撑篈/多面体棱篈）的定位路线：
+   * tier=统一归「无层无棱档」（默认，表与图好认，代价是图上落不进具体层棱）；
+   * nearest=按最靠近的层/棱折算（图上能描出，代价是层数/棱数一改位置就挪、旧单据图纸作废）。
+   */
+  positionPolicy: 'tier' | 'nearest'
+  /**
+   * 位置指纹（决定"哪根篈在哪个位置"的参数摘要：灯型/层数/棱数或等分数/定位策略）。
+   * 本机存档与每次导出都记录；与当前参数不符的存档位置、已发清单/放样图必须作废重出。
+   */
+  posFingerprint: string
   createdAt: string
   updatedAt: string
 }
@@ -86,6 +99,14 @@ export interface FrameMember {
   group: string
   /** 每根含几处绑扎余量 */
   lashJoints: number
+  /**
+   * 统一位置（第几层、第几棱、上口圈/底盘圈、是否无层无棱档）。
+   * 骨架构件表 / 参数预览图 / 备料批量用料 / 三份导出清单 / 本机存档共用同一份。
+   * 多行构件（一根代表 qty 根时）里每一根的位置由 perInstance 逐个给出。
+   */
+  pos: MemberPosition
+  /** 1:1 长条图模板键：相同尺寸的多根合并为一份放样模板 */
+  patternKey: string
   note?: string
 }
 

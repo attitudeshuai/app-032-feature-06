@@ -8,6 +8,7 @@ import { buildFrame, type FrameResult } from './frame'
 import { buildPanels, panelNetArea, type PanelResult } from './panels'
 import { computeBatch, computeMaterials, type BatchMaterials, type SingleLightMaterials } from './materials'
 import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet } from './paginate'
+import { checkPositionNumbering, edgeCountOf, positionFingerprint, positionPolicyOf } from './position'
 import { CRAFT } from './craft'
 
 export interface FullResult {
@@ -188,6 +189,28 @@ function runChecks(
       pass,
       value: `${elapsedMs.toFixed(1)}ms`,
       detail: `${l.divisions} 等分 × ${l.layers.length} 层：构件 ${frame.totalQty} 根、裁片 ${panels.totalQty} 块、图纸 ${sheets.length} 页，全流程耗时 ${elapsedMs.toFixed(1)}ms（含分页）`
+    })
+  }
+
+  // ---- CHK-09 位置编号统一：层/棱序号首尾相接，不断不重；存档指纹一致 ----
+  {
+    const n = edgeCountOf(l, g)
+    const positions = frame.members.map((m) => m.pos)
+    const r = checkPositionNumbering(positions, n, l.layers.length, l.kind === 'polyhedron')
+    const curFp = positionFingerprint(l)
+    const fpOk = !!l.posFingerprint && l.posFingerprint === curFp
+    const policy = positionPolicyOf(l)
+    out.push({
+      id: 'CHK-09',
+      title: '统一位置：层 0..L+1、棱 1..N 首尾相接不断不重，表/图/料/单/存档同源',
+      pass: r.pass && fpOk,
+      value: r.pass ? (fpOk ? '编号与存档指纹一致' : '位置已变更待认账') : '编号异常',
+      detail:
+        r.detail +
+        `；定位路线 ${policy === 'tier' ? '无层无棱档（图上不落位，改层棱不挪）' : '就近折算（能落图，改层棱即作废重出）'}` +
+        (fpOk
+          ? `；存档指纹 ${curFp} 一致`
+          : `；存档指纹 ${l.posFingerprint || '无'} ≠ 当前 ${curFp}，旧存档/已发清单/放样图须作废重出`)
     })
   }
 

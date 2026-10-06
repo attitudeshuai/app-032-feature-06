@@ -92,11 +92,14 @@ function updatedAt(iso: string): string {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="l in lanterns" :key="l.id">
-            <td class="name">{{ l.name }}</td>
+          <tr v-for="l in lanterns" :key="l.id" :class="{ stale: state.stale[l.id] }">
+            <td class="name">
+              {{ l.name }}
+              <span v-if="state.stale[l.id]" class="stale-tag" :title="state.stale[l.id].reasons.join('；')">位置待重出</span>
+            </td>
             <td>{{ kindLabel(l.kind) }}</td>
             <td class="mono">⌀{{ l.maxDiameterMm }} × H{{ l.totalHeightMm }}</td>
-            <td class="mono">{{ l.layers.length }} 层 / {{ l.sides }} 棱</td>
+            <td class="mono">{{ l.layers.length }} 层 / {{ l.kind === 'revolution' ? l.divisions + ' 等分' : l.sides + ' 棱' }}</td>
             <td>{{ coveringLabel(l.covering) }}</td>
             <td class="mono">{{ updatedAt(l.updatedAt) }}</td>
             <td class="ops">
@@ -340,6 +343,22 @@ button.danger:hover {
 
 .name {
   font-weight: 600;
+}
+
+tr.stale td {
+  background: #fdecea;
+}
+
+.stale-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--red);
+  border-radius: 999px;
+  vertical-align: middle;
 }
 
 .mono {

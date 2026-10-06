@@ -9,6 +9,7 @@
 import { computed, onUnmounted, reactive, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChecksPanel from '../components/ChecksPanel.vue'
+import PositionBanner from '../components/PositionBanner.vue'
 import { getLantern } from '../core/store'
 import { CALIBRATION_CIRCLE_MM, CALIBRATION_RULER_MM, computeAll } from '../core/checks'
 import {
@@ -23,6 +24,7 @@ import {
 import { groupMembers } from '../core/frame'
 import { kindName, shapeName } from '../core/exporter'
 import { coveringLabel, kindLabel, styleLabel } from '../core/craft'
+import { positionFingerprint } from '../core/position'
 import type { Panel } from '../core/types'
 
 type PrintMode = 'loft' | 'frame' | 'labels'
@@ -77,6 +79,15 @@ const coverDims = computed(() => {
   const s = g.sections
   return { topMm: s[s.length - 1].radiusMm * 2, botMm: s[0].radiusMm * 2 }
 })
+
+/** 位置指纹过期：打印页（尤其构件清单与长条图）头部明示作废 */
+const posStale = computed(() => {
+  const l = lantern.value
+  if (!l) return false
+  const cur = positionFingerprint(l)
+  return !l.posFingerprint || l.posFingerprint !== cur
+})
+const posFp = computed(() => (lantern.value ? positionFingerprint(lantern.value) : ''))
 
 /** 动态注入 @page 尺寸，保证 1:1（含 A3 横向页面尺寸） */
 watchEffect(() => {
@@ -190,14 +201,25 @@ function stripText(it: SheetItemStrip): string {
   const name = m.label.includes(kind) ? m.label : `${m.label}（${kind}）`
   const parts = [
     `[${it.tag}] ${name}`,
+    it.pattern.copies > 1 ? `同尺寸模板截 ${it.pattern.copies} 根` : '截 1 根',
     `全长 ${f1(it.totalMm)}mm`,
-    `本段 ${f1(it.lengthMm)}mm（整根第 ${f1(it.startMm)}–${f1(it.startMm + it.lengthMm)}mm）`
+    `本段 ${f1(it.lengthMm)}mm（整根第 ${f1(it.startMm)}–${f1(it.startMm + it.lengthMm)}mm）`,
+    stripPositionList(it)
   ]
   if (it.overlapMm > 0) {
     const mates = [it.prevTag, it.nextTag].filter(Boolean).join(' / ')
     parts.push(`与 ${mates} 搭接 ${f1(it.overlapMm)}mm`)
   }
   return parts.join(' · ')
+}
+
+/** 模板对应的各根位置（写明截取后各自贴到哪一层哪一棱）；仅在整根起点段标注一次 */
+function stripPositionList(it: SheetItemStrip): string {
+  if (it.segIndex !== 0) return ''
+  const locs = it.pattern.positions.map((p) => p.positionText)
+  const uniq = [...new Set(locs)]
+  if (uniq.length <= 2) return `各根位置：${uniq.join('；')}`
+  return `各根位置见构件清单（本模板 ${it.pattern.copies} 根，如 ${uniq[0]}）`
 }
 
 function sheetFoot(s: { index: number }) {
@@ -218,6 +240,7 @@ function today(): string {
   <div v-else class="print-view">
     <!-- 屏显控制区（打印时隐藏） -->
     <section class="controls no-print">
+      <PositionBanner :lantern="lantern" />
       <div class="ctl-head">
         <div>
           <h2>1:1 放样图 · {{ lantern.name }}</h2>
@@ -260,6 +283,11 @@ function today(): string {
         {{ opts.paper }}，页边距选「无」；打印后先用第 1 页的 100mm 校验尺核对，误差应 ≤ 1mm。
       </p>
 
+      <p v-if="posStale" class="warn stale-warn">
+        ⛔ 位置指纹已过期（{{ posFp }}）：本页构件清单与骨架长条的位置仍是老位置，<b>打印即作废旧纸，须回到各页按新位置重出</b>；
+        已照旧位置描线、裁好的料退回重新对位。
+      </p>
+
       <section v-if="mode === 'loft'" class="summary">
         <div class="stat"><span>图纸页数</span><b>{{ sheets.length }} 页</b></div>
         <div class="stat"><span>裁片类型</span><b>{{ full.panels.panels.length }} 种 / {{ full.panels.totalQty }} 块</b></div>
@@ -297,7 +325,10 @@ function today(): string {
           <text class="hdr-sub" :x="s.contentX + s.contentWMm" y="10.4" text-anchor="end">
             {{ sheetFoot(s) }}
           </text>
-          <line class="hair" :x1="s.contentX" :x2="s.contentX + s.contentWMm" y1="12.4" y2="12.4" />
+          <text class="hdr-fp" :x="s.contentX" y="12.4" :class="{ stale: posStale }">
+            位置指纹 {{ posFp }}<template v-if="posStale"> · ⛔位置已作废，请按新位置重出此图（旧图描线/裁料退回重对）</template>
+          </text>
+          <line class="hair" :x1="s.contentX" :x2="s.contentX + s.contentWMm" y1="14" y2="14" />
 
           <text v-if="s.warn" class="warn-text" :x="s.contentX" :y="s.contentY + 4">{{ s.warn }}</text>
 
@@ -571,41 +602,55 @@ function today(): string {
     <!-- ============ 构件清单（可打印） ============ -->
     <section v-else-if="mode === 'frame'" class="doc">
       <h1>骨架构件清单</h1>
+      <p v-if="posStale" class="doc-stale">
+        ⛔ 作废旧单：本清单依据的位置编号已过期（新指纹 {{ posFp }}）。此单与已发放样图、已裁料请按新位置全部作废重出。
+      </p>
       <p class="doc-meta">
         灯样：{{ lantern.name }}（{{ kindLabel(lantern.kind) }}）· 最大直径 {{ lantern.maxDiameterMm }}mm · 总高
-        {{ lantern.totalHeightMm }}mm · {{ lantern.layers.length }} 层 · {{ lantern.sides }} 棱 ·
+        {{ lantern.totalHeightMm }}mm · {{ lantern.layers.length }} 层 ·
+        {{ lantern.kind === 'revolution' ? lantern.divisions + ' 等分（母线根数）' : lantern.sides + ' 棱' }} ·
         收口 {{ styleLabel(lantern.mouthStyle) }}/{{ styleLabel(lantern.bottomStyle) }} ·
         每端绑扎余量 {{ lantern.lashAllowanceMm }}mm · 蒙面 {{ coveringLabel(lantern.covering) }} ·
-        打印日期 {{ today() }}
+        位置指纹 {{ posFp }} · 位置坐标 mm 取整（显示 cm 保留 1 位）· 打印日期 {{ today() }}
       </p>
       <table class="doc-table">
         <thead>
           <tr>
             <th>构件名称</th>
+            <th>第几层</th>
+            <th>第几棱 / 圈</th>
+            <th>上口 / 底盘</th>
             <th>类别</th>
-            <th>分组</th>
+            <th>位置坐标 (mm / cm)</th>
             <th class="num">净长 (mm)</th>
             <th class="num">截取长度 (mm，含余量)</th>
             <th class="num">余量处数</th>
             <th class="num">数量</th>
-            <th class="num">总截取长 (mm)</th>
             <th>弯曲半径 / 折角</th>
           </tr>
         </thead>
         <tbody>
           <template v-for="grp in frameGroups" :key="grp.group">
             <tr class="doc-group">
-              <td colspan="9">{{ grp.group }}</td>
+              <td colspan="11">{{ grp.group }}</td>
             </tr>
-            <tr v-for="m in grp.items" :key="m.id">
+            <tr v-for="m in grp.items" :key="m.id" :class="{ notier: m.pos.inNoTier, nearest: m.pos.nearestDerived }">
               <td>{{ m.label }}</td>
+              <td>{{ m.pos.layerText }}</td>
+              <td>{{ m.pos.edgeText }}</td>
+              <td>{{ m.pos.rim === 'mouth' ? '上口圈' : m.pos.rim === 'base' ? '底盘圈' : '—' }}</td>
               <td>{{ kindName(m.kind) }}</td>
-              <td>{{ m.group }}</td>
+              <td class="mono small">
+                <template v-if="m.pos.anchorMm">
+                  {{ m.pos.anchorMm.x }},{{ m.pos.anchorMm.y }},{{ m.pos.anchorMm.z }}mm /
+                  {{ f1(m.pos.anchorMm.x / 10) }},{{ f1(m.pos.anchorMm.y / 10) }},{{ f1(m.pos.anchorMm.z / 10) }}cm
+                </template>
+                <template v-else>无层无棱档</template>
+              </td>
               <td class="num mono">{{ f1(m.rawLengthMm) }}</td>
               <td class="num mono strong">{{ f1(m.lengthMm) }}</td>
               <td class="num mono">×{{ m.lashJoints }}</td>
               <td class="num mono">{{ m.qty }}</td>
-              <td class="num mono">{{ f1(m.lengthMm * m.qty) }}</td>
               <td class="mono">{{ m.bendRadiusMm ? `R${f1(m.bendRadiusMm)}mm` : m.bendAngleDeg ? `${f1(m.bendAngleDeg)}°` : '—' }}</td>
             </tr>
           </template>
@@ -613,8 +658,8 @@ function today(): string {
       </table>
       <p class="doc-foot">
         合计：构件 {{ full.frame.totalQty }} 根 · 备料（含余量）{{ (full.frame.stockLengthMm / 1000).toFixed(3) }}m ·
-        净长 {{ (full.frame.rawLengthMm / 1000).toFixed(3) }}m · 绑扎余量合计
-        {{ f1(full.frame.lashExtraMm) }}mm
+        净长 {{ (full.frame.rawLengthMm / 1000).toFixed(3) }}m · 绑扎余量合计 {{ f1(full.frame.lashExtraMm) }}mm
+        <br />无层无棱档（黄底）= 中轴/多面体棱篈等图上不落层棱；就近折算行 = 层/棱数一改位置即挪，须以本单指纹为准。
       </p>
     </section>
 
@@ -859,6 +904,16 @@ button.primary:hover {
   fill: #6a5c52;
 }
 
+.hdr-fp {
+  font-size: 2.4px;
+  fill: #2f7a63;
+}
+
+.hdr-fp.stale {
+  fill: #b3241f;
+  font-weight: 700;
+}
+
 .hair {
   stroke: #c6b49b;
   stroke-width: 0.3;
@@ -1016,6 +1071,34 @@ button.primary:hover {
   color: var(--ink-soft);
   border-bottom: 1px solid var(--line);
   padding-bottom: 8px;
+}
+
+.doc-stale {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #8f1c19;
+  background: #fdecea;
+  border: 1px solid #e7c3bb;
+  border-radius: 6px;
+}
+
+.doc-table tr.notier td {
+  background: #fdf6e0;
+}
+
+.doc-table tr.nearest td {
+  background: #fdf1ee;
+}
+
+.doc-table td.small {
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.stale-warn {
+  font-weight: 700;
 }
 
 .doc-table {

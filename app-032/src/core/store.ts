@@ -6,16 +6,28 @@ import { reactive, watch } from 'vue'
 import type { Lantern } from './types'
 import { CRAFT, coveringSpec, presetById, PRESETS } from './craft'
 import { buildGeometry, effectiveHeight, r1 } from './geometry'
+import { positionFingerprint } from './position'
 
 const KEY = 'lantern-frame-lofting.v1'
+
+interface StaleInfo {
+  /** 存档里记录的位置指纹 */
+  saved: string
+  /** 按当前参数应有的位置指纹 */
+  current: string
+  /** 变化的维度（层数/棱数/等分数/定位策略） */
+  reasons: string[]
+}
 
 interface StoreState {
   lanterns: Lantern[]
   ready: boolean
   storageError: string
+  /** 位置指纹已过期的灯样（存档位置、据其导出的清单与放样图都需作废重出） */
+  stale: Record<string, StaleInfo>
 }
 
-export const state = reactive<StoreState>({ lanterns: [], ready: false, storageError: '' })
+export const state = reactive<StoreState>({ lanterns: [], ready: false, storageError: '', stale: {} })
 
 let suspendPersist = false
 let timer: number | undefined
@@ -65,10 +77,13 @@ export function createFromPreset(presetId: string): Lantern {
     wasteRatio: coveringSpec(p.covering).wasteRatio,
     pageSize: 'A4',
     overlapMm: CRAFT.defaultOverlapMm,
+    positionPolicy: 'tier',
+    posFingerprint: '',
     createdAt: now,
     updatedAt: now
   }
   syncLayerDiameters(lantern)
+  lantern.posFingerprint = positionFingerprint(lantern)
   return lantern
 }
 
@@ -80,6 +95,51 @@ export function syncLayerDiameters(l: Lantern) {
     if (sec) ly.diameterMm = r1(sec.radiusMm * 2)
   })
   l.totalHeightMm = r1(effectiveHeight(l))
+}
+
+/** 补齐老存档缺失的定位字段（老灯样默认走 tier 无层无棱档） */
+function migrateLantern(l: Lantern) {
+  if (l.positionPolicy !== 'tier' && l.positionPolicy !== 'nearest') l.positionPolicy = 'tier'
+  if (typeof l.posFingerprint !== 'string') l.posFingerprint = ''
+}
+
+/** 比较存档指纹与当前参数，给出位置作废原因；一致返回 null */
+export function staleInfoOf(l: Lantern): StaleInfo | null {
+  migrateLantern(l)
+  const saved = l.posFingerprint || ''
+  const current = positionFingerprint(l)
+  if (saved && saved === current) return null
+  const reasons: string[] = []
+  const savedParts = saved.split('|')
+  const curParts = current.split('|')
+  // [kind, layers, edges, policy]
+  if (!saved) reasons.push('该灯样在统一位置编号上线前存档（无位置指纹）')
+  if (savedParts[1] !== curParts[1]) reasons.push(`层数 ${savedParts[1] ?? '?'} → ${curParts[1]}`)
+  if (savedParts[2] !== curParts[2]) {
+    reasons.push(l.kind === 'revolution' ? `母线等分数 ${savedParts[2] ?? '?'} → ${curParts[2]}` : `棱数 ${savedParts[2] ?? '?'} → ${curParts[2]}`)
+  }
+  if (savedParts[3] !== curParts[3]) {
+    reasons.push(`无层无棱定位路线 ${savedParts[3] ?? '?'} → ${curParts[3]}`)
+  }
+  return { saved, current, reasons }
+}
+
+/** 重新扫描全部灯样的位置过期状态 */
+export function refreshStale() {
+  for (const l of state.lanterns) {
+    migrateLantern(l)
+    const info = staleInfoOf(l)
+    if (info) state.stale[l.id] = info
+    else delete state.stale[l.id]
+  }
+}
+
+/** 认定当前位置为准（旧存档位置/已发单据/已裁料均已作废重出后调用），刷新存档指纹 */
+export function acknowledgePosition(l: Lantern) {
+  migrateLantern(l)
+  l.posFingerprint = positionFingerprint(l)
+  l.updatedAt = new Date().toISOString()
+  delete state.stale[l.id]
 }
 
 /** 分段高度均分（改总高/层数时调用） */
@@ -122,7 +182,10 @@ export function removeLantern(id: string) {
 function persistNow() {
   suspendPersist = true
   try {
-    for (const l of state.lanterns) syncLayerDiameters(l)
+    for (const l of state.lanterns) {
+      syncLayerDiameters(l)
+      migrateLantern(l)
+    }
     localStorage.setItem(KEY, JSON.stringify({ version: 1, lanterns: state.lanterns }))
     state.storageError = ''
   } catch (e) {
@@ -147,7 +210,10 @@ export function loadStore() {
     const raw = localStorage.getItem(KEY)
     if (raw) {
       const data = JSON.parse(raw) as { lanterns?: Lantern[] }
-      if (Array.isArray(data.lanterns)) state.lanterns = data.lanterns
+      if (Array.isArray(data.lanterns)) {
+        data.lanterns.forEach(migrateLantern)
+        state.lanterns = data.lanterns
+      }
     }
   } catch {
     state.storageError = '本地灯样数据损坏，已重置'
@@ -156,11 +222,13 @@ export function loadStore() {
     state.lanterns.push(createFromPreset('hex-palace'))
   }
   state.ready = true
+  refreshStale()
   watch(
     () => state.lanterns,
     () => {
       if (suspendPersist) return
       schedulePersist()
+      refreshStale()
     },
     { deep: true }
   )
@@ -176,6 +244,9 @@ export function useLanternStore() {
     duplicateLantern,
     removeLantern,
     distributeLayers,
-    syncLayerDiameters
+    syncLayerDiameters,
+    refreshStale,
+    staleInfoOf,
+    acknowledgePosition
   }
 }

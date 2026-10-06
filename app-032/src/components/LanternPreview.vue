@@ -1,18 +1,47 @@
 <script setup lang="ts">
-/** 灯体预览：正视 / 俯视 / 等轴测示意（不做 3D 渲染，等轴测为线框投影） */
+/** 灯体预览：正视 / 俯视 / 等轴测示意（不做 3D 渲染，等轴测为线框投影）
+ *  骨架构件按统一位置（core/position）逐根描出；表↔图用 member.pos.key 双向点选。
+ */
 import { computed, ref } from 'vue'
-import type { Lantern } from '../core/types'
+import type { FrameMember, Lantern } from '../core/types'
 import { buildGeometry, radiusAtY, segmentInfos, topShoulder } from '../core/geometry'
+import { edgeCountOf, type MemberPosition } from '../core/position'
 
 const props = defineProps<{
   lantern: Lantern
   mode: 'front' | 'top' | 'iso'
   interactive?: boolean
+  /** 参与描线/点选的骨架构件（不传则只画轮廓） */
+  members?: FrameMember[]
+  /** 当前高亮的位置身份键（点表行 → 图上这一根显出来） */
+  selectedKey?: string | null
+  /** 是否允许点图选构件（点图 → 表落到那一行） */
+  selectable?: boolean
 }>()
-const emit = defineEmits<{ (e: 'update-ctrl', v: { which: 1 | 2; x: number; y: number }): void }>()
+const emit = defineEmits<{
+  (e: 'update-ctrl', v: { which: 1 | 2; x: number; y: number }): void
+  (e: 'select', key: string | null): void
+}>()
 
 const g = computed(() => buildGeometry(props.lantern))
 const dragging = ref<0 | 1 | 2>(0)
+
+/** 一根构件在正视图里的折线（灯体坐标：x=半径方向，y=离底高；投影取 x 与 z 两方向） */
+interface MemberTrace {
+  key: string
+  label: string
+  pos: MemberPosition
+  /** 正视右/左两侧折线（竖篈与整圈在正视为横向弦） */
+  front?: { x1: number; y1: number; x2: number; y2: number }[]
+  /** 俯视线段/圆/点 */
+  top?: (
+    | { x1: number; z1: number; x2: number; z2: number }
+    | { circle: number; y: number; dashed?: boolean }
+    | { dot: true; x: number; z: number }
+  )[]
+  /** 图上是否能落到具体位置（无层无棱档件为 false） */
+  located: boolean
+}
 
 const PAD = 46
 const viewBox = computed(() => {
@@ -89,6 +118,88 @@ const cornerLines = computed(() => {
     { x: sx(-geo.maxR * cosA), mirror: true }
   ]
 })
+
+/**
+ * 每根骨架构件按统一位置描出的线段。
+ * 正视：竖篈画沿棱折线，横篈段/圈画该高度的弦，圈件画整圈在正视为左右两点间弦；
+ * 俯视：竖篈/母线为棱点，横篈段为两棱间边，圈为圆。
+ * 无层无棱档（anchorMm 为 null）不落到具体位置，只在档内列表中认。
+ */
+const traces = computed<MemberTrace[]>(() => {
+  const geo = g.value
+  const members = props.members || []
+  const n = edgeCountOf(props.lantern, geo)
+  const out: MemberTrace[] = []
+
+  const ang = (j1: number) => -Math.PI / 2 + (2 * Math.PI * (j1 - 1)) / n
+  const pointRZ = (r: number, j1: number) => ({ x: r * Math.cos(ang(j1)), z: r * Math.sin(ang(j1)) })
+
+  for (const m of members) {
+    const p = m.pos
+    const tr: MemberTrace = { key: p.key, label: m.label, pos: p, located: !!p.anchorMm, front: [], top: [] }
+    const role = p.role
+
+    if (role === 'vertical') {
+      const j = p.edge ?? 1
+      // 沿各层截面（半径随高变化）折线；正视投影取棱方向在画面平面的分量：用该棱 x 坐标
+      const pts = geo.sections.map((s) => {
+        const q = pointRZ(s.radiusMm, j)
+        return { x: q.x, y: s.yMm }
+      })
+      tr.front = pts.slice(1).map((b, i) => ({ x1: pts[i].x, y1: pts[i].y, x2: b.x, y2: b.y }))
+      // 俯视：棱点（画一个小圆点）
+      const r0 = geo.sections[0].radiusMm
+      const q = pointRZ(r0, j)
+      tr.top = [{ dot: true, x: q.x, z: q.z }]
+    } else if (role === 'ring_segment' || role === 'mouth_segment' || role === 'base_segment') {
+      const sec = geo.sections.find((s) => s.index === p.layer) || geo.sections[0]
+      const j1 = p.edgeFrom ?? 1
+      const j2 = p.edgeTo ?? (j1 % n) + 1
+      const a = pointRZ(sec.radiusMm, j1)
+      const b = pointRZ(sec.radiusMm, j2)
+      tr.front = [{ x1: a.x, y1: sec.yMm, x2: b.x, y2: sec.yMm }]
+      tr.top = [{ x1: a.x, z1: a.z, x2: b.x, z2: b.z }]
+    } else if (role === 'ring_full' || role === 'mouth_full' || role === 'base_full' || role === 'support_full') {
+      const sec = geo.sections.find((s) => s.index === p.layer)
+      // 支撑篈折算到中间层时取该层截面；档内（layer 为 null）回落到锚点坐标
+      const r = sec ? sec.radiusMm : p.anchorMm?.x ?? 0
+      const y = sec ? sec.yMm : p.anchorMm?.y ?? 0
+      // 正视为该高度横跨直径的弦
+      tr.front = [{ x1: -r, y1: y, x2: r, y2: y }]
+      tr.top = [{ circle: r, y, dashed: role === 'support_full' }]
+    } else if (role === 'spoke') {
+      const j = p.edge ?? 1
+      const sec = p.end === 'top' ? geo.sections[geo.sections.length - 1] : geo.sections[0]
+      const q = pointRZ(sec.radiusMm, j)
+      tr.front = p.inNoTier ? [] : [{ x1: 0, y1: sec.yMm, x2: q.x, y2: sec.yMm }]
+      tr.top = p.inNoTier ? [] : [{ x1: 0, z1: 0, x2: q.x, z2: q.z }]
+    } else if (role === 'axis') {
+      // 中轴在正视/俯视都是中心点一根竖线（tier 策略不画）
+      if (!p.inNoTier) {
+        tr.front = [{ x1: 0, y1: 0, x2: 0, y2: geo.heightMm }]
+        const q = { x: 0, z: 0 }
+        tr.top = [{ x1: q.x, z1: q.z, x2: q.x, z2: q.z }]
+      }
+    }
+    // poly_edge（多面体）与无锚点档内件：located=false，不描线
+    out.push(tr)
+  }
+  return out
+})
+
+/** 位于无层无棱档的构件（图上落不了位，单独在图下/角标里认） */
+const noTierTraces = computed(() => traces.value.filter((t) => !t.located))
+
+function isSel(key: string) {
+  return props.selectedKey === key
+}
+function onTraceClick(key: string) {
+  if (!props.selectable) return
+  emit('select', props.selectedKey === key ? null : key)
+}
+
+/** 俯视坐标变换（与模板里 translate 到圆心一致，这里返回相对圆心的用户坐标） */
+
 
 const gridLines = computed(() => {
   const geo = g.value
@@ -252,6 +363,43 @@ const isoPaths = computed(() => {
         />
       </g>
 
+      <!-- 骨架构件：按统一位置逐根描出，点选与表行联动 -->
+      <g v-if="members && mode === 'front'" class="members">
+        <template v-for="t in traces" :key="t.key">
+          <line
+            v-for="(seg, si) in t.front"
+            :key="si"
+            :x1="sx(seg.x1)"
+            :y1="sy(seg.y1)"
+            :x2="sx(seg.x2)"
+            :y2="sy(seg.y2)"
+            class="member-line"
+            :class="{ on: isSel(t.key), dim: selectedKey && !isSel(t.key) }"
+            :style="isSel(t.key) ? { strokeWidth: 2.6 } : null"
+            @pointerdown.stop="onTraceClick(t.key)"
+          >
+            <title>{{ t.label }} · {{ t.pos.positionText }}</title>
+          </line>
+        </template>
+      </g>
+
+      <!-- 无层无棱档构件：正视图上不落具体位置，用一条角标列出 -->
+      <g v-if="members && noTierTraces.length && mode === 'front'" class="notier">
+        <rect x="6" y="6" :width="Math.min(FRONT_W - 12, 190)" :height="10 + noTierTraces.length * 9" rx="3" />
+        <text x="11" y="13" class="notier-title">无层无棱档（图上不落位）</text>
+        <text
+          v-for="(t, i) in noTierTraces"
+          :key="t.key"
+          :x="11"
+          :y="23 + i * 9"
+          class="notier-item"
+          :class="{ on: isSel(t.key) }"
+          @pointerdown.stop="onTraceClick(t.key)"
+        >
+          {{ t.label }}
+        </text>
+      </g>
+
       <!-- 尺寸标注 -->
       <g class="dim">
         <line :x1="sx(-g.maxR)" :x2="sx(g.maxR)" :y1="FRONT_H - 16" :y2="FRONT_H - 16" />
@@ -348,6 +496,51 @@ const isoPaths = computed(() => {
             />
           </template>
         </g>
+
+        <!-- 骨架构件俯视：按统一位置，点选与表行联动 -->
+        <g v-if="members" class="members">
+          <template v-for="t in traces" :key="t.key">
+            <template v-for="(seg, si) in t.top" :key="si">
+              <circle
+                v-if="'circle' in seg"
+                :r="seg.circle"
+                class="member-line"
+                :class="{ on: isSel(t.key), dim: selectedKey && !isSel(t.key) }"
+                :stroke-dasharray="seg.dashed ? '3 2' : ''"
+                fill="none"
+                @pointerdown.stop="onTraceClick(t.key)"
+              >
+                <title>{{ t.label }} · {{ t.pos.positionText }}</title>
+              </circle>
+              <circle
+                v-else-if="'dot' in seg"
+                :cx="seg.x"
+                :cy="seg.z"
+                r="2.6"
+                class="member-dot"
+                :class="{ on: isSel(t.key) }"
+                @pointerdown.stop="onTraceClick(t.key)"
+              >
+                <title>{{ t.label }} · {{ t.pos.positionText }}</title>
+              </circle>
+              <line
+                v-else
+                :x1="seg.x1"
+                :y1="seg.z1"
+                :x2="seg.x2"
+                :y2="seg.z2"
+                class="member-line"
+                :class="{ on: isSel(t.key), dim: selectedKey && !isSel(t.key) }"
+                @pointerdown.stop="onTraceClick(t.key)"
+              >
+                <title>{{ t.label }} · {{ t.pos.positionText }}</title>
+              </line>
+            </template>
+          </template>
+        </g>
+        <text v-if="members && noTierTraces.length" :x="0" :y="g.maxR + 22" text-anchor="middle" class="dim-text notier-plan">
+          另有 {{ noTierTraces.length }} 根在无层无棱档（中轴/多面体棱篈等，俯视不落位）
+        </text>
         <text :x="0" :y="-g.maxR - 16" text-anchor="middle" class="dim-text">
           俯视 · 外接 ⌀{{ (g.maxR * 2).toFixed(1) }}mm / {{ g.polygon ? g.n + ' 棱' : '旋转体' }}
         </text>
@@ -472,5 +665,58 @@ const isoPaths = computed(() => {
 .dim-text {
   font-size: 8px;
   fill: #6a5c52;
+}
+
+.members .member-line {
+  stroke: rgba(47, 95, 138, 0.85);
+  stroke-width: 1.1;
+  cursor: pointer;
+  pointer-events: stroke;
+}
+
+.members .member-line.dim {
+  stroke: rgba(47, 95, 138, 0.14);
+}
+
+.members .member-line.on {
+  stroke: #b3241f;
+  filter: drop-shadow(0 0 1.2px rgba(179, 36, 31, 0.6));
+}
+
+.members .member-dot {
+  fill: rgba(47, 95, 138, 0.85);
+  cursor: pointer;
+  pointer-events: all;
+}
+
+.members .member-dot.on {
+  fill: #b3241f;
+}
+
+.notier rect {
+  fill: rgba(246, 227, 186, 0.92);
+  stroke: #c9a227;
+  stroke-width: 0.4;
+}
+
+.notier-title {
+  font-size: 7.5px;
+  font-weight: 700;
+  fill: #8a4b12;
+}
+
+.notier-item {
+  font-size: 7px;
+  fill: #6a5c52;
+  cursor: pointer;
+}
+
+.notier-item.on {
+  fill: #b3241f;
+  font-weight: 700;
+}
+
+.notier-plan {
+  fill: #8a4b12;
 }
 </style>

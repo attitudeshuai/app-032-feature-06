@@ -2,12 +2,14 @@
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChecksPanel from '../components/ChecksPanel.vue'
+import PositionBanner from '../components/PositionBanner.vue'
 import { getLantern } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { downloadText, materialsCsv } from '../core/exporter'
 import { coveringSpec, CRAFT } from '../core/craft'
 import { panelCutArea } from '../core/panels'
+import { cm1 } from '../core/position'
 
 const route = useRoute()
 const router = useRouter()
@@ -44,11 +46,21 @@ function exportCsv() {
   if (!l || !full.value) return
   downloadText(`${l.name}-备料单.csv`, materialsCsv(l, full.value.materials, full.value.batch))
 }
+
+/** 竹篈按统一位置逐根分开的用量（与构件表/预览/导出/存档同源） */
+const posRows = computed(() => full.value?.batch.byPosition ?? [])
+
+function coordText(u: { pos: { anchorMm: { x: number; y: number; z: number } | null } }): string {
+  const a = u.pos.anchorMm
+  if (!a) return '无层无棱档'
+  return `x${a.x} y${a.y} z${a.z}mm / ${cm1(a.x)} ${cm1(a.y)} ${cm1(a.z)}cm`
+}
 </script>
 
 <template>
   <div v-if="!lantern || !full || !cov" class="missing">找不到该灯样。<router-link to="/">返回</router-link></div>
   <div v-else class="materials">
+    <PositionBanner :lantern="lantern" />
     <section class="head">
       <div>
         <h2>材料统计与备料单 · {{ lantern.name }}</h2>
@@ -165,6 +177,39 @@ function exportCsv() {
           </tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="palette pos-table">
+      <h3>竹篾按位置分开备料（同一套位置：第几层·第几棱 / 上口圈 / 底盘圈）</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>构件</th>
+            <th>第几层</th>
+            <th>第几棱 / 圈</th>
+            <th>上口 / 底盘</th>
+            <th>位置坐标</th>
+            <th class="num">单灯截取 (mm)</th>
+            <th class="num">单灯净长 (mm)</th>
+            <th class="num">批量 {{ full.batch.count }} 个截取合计 (mm，含损耗)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="u in posRows" :key="u.key" :class="{ notier: u.inNoTier, nearest: u.nearestDerived }">
+            <td>{{ u.label }}</td>
+            <td>{{ u.layerText }}</td>
+            <td>{{ u.edgeText }}</td>
+            <td>{{ u.pos.rim === 'mouth' ? '上口圈' : u.pos.rim === 'base' ? '底盘圈' : '—' }}</td>
+            <td class="mono small">{{ coordText(u) }}</td>
+            <td class="num mono">{{ u.lengthMm.toFixed(1) }}</td>
+            <td class="num mono">{{ u.rawLengthMm.toFixed(1) }}</td>
+            <td class="num mono strong">{{ u.batchLengthMm.toFixed(1) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="pos-foot">
+        无层无棱档的件（黄底）图上不落具体坐标；就近折算的件（斜纹提示）层/棱数一改位置会挪，旧单据图纸须作废重出。
+      </p>
     </section>
 
     <ChecksPanel :checks="full.checks" :elapsed-ms="full.elapsedMs" title="全量验收自检（§10）" />
@@ -405,6 +450,32 @@ tr.led td {
   border-radius: 3px;
   margin-right: 5px;
   border: 1px solid var(--line-strong);
+}
+
+.pos-table table {
+  box-shadow: none;
+  border: none;
+  border-radius: 0;
+}
+
+.pos-table tr.notier td {
+  background: #fdf6e0;
+  color: #8a6a12;
+}
+
+.pos-table tr.nearest td {
+  background: #fdf1ee;
+}
+
+.pos-table .small {
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.pos-foot {
+  margin: 8px 14px 0;
+  font-size: 12px;
+  color: var(--ink-soft);
 }
 
 .missing {
