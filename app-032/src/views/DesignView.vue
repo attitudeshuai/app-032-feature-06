@@ -1,19 +1,24 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import LanternPreview from '../components/LanternPreview.vue'
 import ChecksPanel from '../components/ChecksPanel.vue'
-import { getLantern, distributeLayers, syncLayerDiameters } from '../core/store'
+import { getLantern, distributeLayers, syncLayerDiameters, isPositionStale, restampPosition } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { buildGeometry, polyhedronInfo, r1 } from '../core/geometry'
 import { COVERINGS, CRAFT, coveringSpec, kindLabel } from '../core/craft'
 import { diameterFromPerimeter, diameterFromRib } from '../core/checks'
+import { POSITION_POLICY_TEXT } from '../core/positions'
+import { selectInstance, selectedKey } from '../core/selection'
 import type { Lantern, Panel } from '../core/types'
 
 const route = useRoute()
+const router = useRouter()
 const lantern = computed(() => getLantern(route.params.id as string))
 const mode = ref<'front' | 'top' | 'iso'>('front')
+const stale = computed(() => (lantern.value ? isPositionStale(lantern.value) : false))
+const selKey = computed(() => (lantern.value ? selectedKey(lantern.value.id) : ''))
 
 const loft = computed(() => ({
   ...DEFAULT_LOFT_OPTIONS,
@@ -121,6 +126,26 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
   if (v.which === 1) l.ctrl1 = { x: v.x, y: v.y }
   else l.ctrl2 = { x: v.x, y: v.y }
 }
+
+/** 点预览上任一根：图→表联动（骨架件表页会落到同一行） */
+function onPick(memberId: string, edgeNo: number | null) {
+  const l = lantern.value
+  if (!l || !memberId) return
+  selectInstance(l.id, memberId, edgeNo)
+}
+
+function goFrame() {
+  const l = lantern.value
+  if (l) router.push(`/frame/${l.id}`)
+}
+
+function doRestamp() {
+  const l = lantern.value
+  if (!l) return
+  if (window.confirm('重认位置后：此前已导出的构件清单、裁片清单、备料单与 1:1 放样图全部作废需重出；照旧位置裁好的中轴/顶盖/底盘料要退回重新对位。确认重认？')) {
+    restampPosition(l)
+  }
+}
 </script>
 
 <template>
@@ -143,20 +168,20 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
           <label>灯型</label>
           <input :value="kindLabel(lantern.kind)" type="text" readonly />
         </div>
-        <div class="field">
-          <label>{{ lantern.kind === 'revolution' ? '竖篾（母线）根数' : '棱数' }}</label>
-          <input
-            v-if="lantern.kind !== 'polyhedron'"
-            :value="lantern.sides"
-            type="number"
-            min="3"
-            max="24"
-            @change="setSides"
-          />
-          <select v-else v-model.number="lantern.sides">
+        <div v-if="lantern.kind === 'polyhedron'" class="field">
+          <label>多面体</label>
+          <select v-model.number="lantern.sides">
             <option :value="4">正四面体（4 面）</option>
             <option :value="8">正八面体（8 面）</option>
           </select>
+        </div>
+        <div v-else-if="lantern.kind === 'prism' || lantern.kind === 'box'" class="field">
+          <label>棱数</label>
+          <input :value="lantern.sides" type="number" min="3" max="12" @change="setSides" />
+        </div>
+        <div v-else class="field">
+          <label>旋转体等分数（= 母线篈根数）</label>
+          <input v-model.number="lantern.divisions" type="number" :min="CRAFT.divMin" :max="CRAFT.divMax" step="1" />
         </div>
       </div>
 
@@ -320,21 +345,36 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
     </section>
 
     <section class="viewer">
+      <section v-if="stale" class="stale-banner">
+        <div>
+          <b>⚠ 此灯样还挂着老位置（无 POS-A1 戳）。</b>
+          存档位置、已导出的构件清单/裁片清单/备料单、1:1 放样图均需重认后重出；已裁好的中轴/顶盖/底盘料退回重新对位。
+        </div>
+        <button class="primary" @click="doRestamp">重认位置并盖戳</button>
+      </section>
+
       <div class="tabs">
         <button :class="{ on: mode === 'front' }" @click="mode = 'front'">正视图</button>
         <button :class="{ on: mode === 'top' }" @click="mode = 'top'">俯视图</button>
         <button :class="{ on: mode === 'iso' }" @click="mode = 'iso'">等轴测</button>
+        <button class="link" @click="goFrame">到骨架件表对位 →</button>
         <span v-if="lantern.mouthStyle === 'gourd'" class="tip">拖动绿色控制点可改葫芦口曲线</span>
+        <span v-else class="tip">点灯体上一根 → 骨架件表落到同一行（位置方案 POS-A1）</span>
       </div>
 
       <div class="canvas">
         <LanternPreview
           :lantern="lantern"
           :mode="mode"
+          :model="full?.positions"
+          :members="full?.frame.members"
+          :selected="selKey"
           interactive
           @update-ctrl="onCtrl"
+          @pick="onPick"
         />
       </div>
+      <p class="policy-line">{{ POSITION_POLICY_TEXT }} 坐标 mm 取整、cm 保留 1 位；棱/母线序号 1 号在俯视正上方，顺时针，末号接 1 号。</p>
 
       <div v-if="full" class="stats">
         <div class="stat"><span>构件总数</span><b>{{ full.frame.totalQty }}</b></div>
@@ -592,6 +632,34 @@ button:hover {
   margin-left: auto;
   font-size: 12px;
   color: var(--jade);
+}
+
+.tabs .link {
+  background: #f6e3ba;
+  border-color: var(--gold);
+  color: #8f1c19;
+  font-weight: 600;
+}
+
+.policy-line {
+  margin: -4px 2px 0;
+  font-size: 11.5px;
+  color: #8a6d3b;
+  line-height: 1.6;
+}
+
+.stale-banner {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  background: #fdecea;
+  border: 1px solid #e3b3ae;
+  color: #8f1c19;
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
 .canvas {

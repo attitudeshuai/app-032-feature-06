@@ -21,8 +21,9 @@ import {
   type SheetItemStrip
 } from '../core/paginate'
 import { groupMembers } from '../core/frame'
-import { kindName, shapeName } from '../core/exporter'
+import { kindName, shapeName, panelPositionText } from '../core/exporter'
 import { coveringLabel, kindLabel, styleLabel } from '../core/craft'
+import { POSITION_POLICY_TEXT, POSITION_SCHEME, positionText } from '../core/positions'
 import type { Panel } from '../core/types'
 
 type PrintMode = 'loft' | 'frame' | 'labels'
@@ -190,6 +191,7 @@ function stripText(it: SheetItemStrip): string {
   const name = m.label.includes(kind) ? m.label : `${m.label}（${kind}）`
   const parts = [
     `[${it.tag}] ${name}`,
+    positionText(m.pos),
     `全长 ${f1(it.totalMm)}mm`,
     `本段 ${f1(it.lengthMm)}mm（整根第 ${f1(it.startMm)}–${f1(it.startMm + it.lengthMm)}mm）`
   ]
@@ -291,6 +293,7 @@ function today(): string {
             {{ lantern.totalHeightMm }}mm · {{ lantern.layers.length }} 层
           </text>
           <text class="hdr-sub" :x="s.contentX" y="10.4">
+            位置 {{ lantern.posVersion || POSITION_SCHEME }}（存档戳：{{ lantern.posVersion || '无-老位置待重认' }}）·
             蒙面 {{ coveringLabel(lantern.covering) }} · 缝份四边各 {{ lantern.seamAllowanceMm }}mm（已计入裁片尺寸）·
             {{ styleLabel(lantern.mouthStyle) }}/{{ styleLabel(lantern.bottomStyle) }} · 单位 mm
           </text>
@@ -573,17 +576,22 @@ function today(): string {
       <h1>骨架构件清单</h1>
       <p class="doc-meta">
         灯样：{{ lantern.name }}（{{ kindLabel(lantern.kind) }}）· 最大直径 {{ lantern.maxDiameterMm }}mm · 总高
-        {{ lantern.totalHeightMm }}mm · {{ lantern.layers.length }} 层 · {{ lantern.sides }} 棱 ·
+        {{ lantern.totalHeightMm }}mm · {{ lantern.layers.length }} 层 ·
+        {{ lantern.kind === 'revolution' ? lantern.divisions + ' 等分（=母线根数）' : lantern.sides + ' 棱' }} ·
         收口 {{ styleLabel(lantern.mouthStyle) }}/{{ styleLabel(lantern.bottomStyle) }} ·
         每端绑扎余量 {{ lantern.lashAllowanceMm }}mm · 蒙面 {{ coveringLabel(lantern.covering) }} ·
         打印日期 {{ today() }}
+      </p>
+      <p class="doc-pos" :class="{ stale: lantern.posVersion !== POSITION_SCHEME }">
+        位置方案：{{ lantern.posVersion || '无戳（老位置，本单作废需重出）' }} ·
+        {{ POSITION_POLICY_TEXT }} 坐标 mm 取整 / cm 保留 1 位；棱号自俯视正上方 1 号顺时针、末号接 1 号。
       </p>
       <table class="doc-table">
         <thead>
           <tr>
             <th>构件名称</th>
             <th>类别</th>
-            <th>分组</th>
+            <th>位置（层/棱/圈口/档）</th>
             <th class="num">净长 (mm)</th>
             <th class="num">截取长度 (mm，含余量)</th>
             <th class="num">余量处数</th>
@@ -600,7 +608,7 @@ function today(): string {
             <tr v-for="m in grp.items" :key="m.id">
               <td>{{ m.label }}</td>
               <td>{{ kindName(m.kind) }}</td>
-              <td>{{ m.group }}</td>
+              <td class="doc-pos-cell">{{ positionText(m.pos) }}</td>
               <td class="num mono">{{ f1(m.rawLengthMm) }}</td>
               <td class="num mono strong">{{ f1(m.lengthMm) }}</td>
               <td class="num mono">×{{ m.lashJoints }}</td>
@@ -614,7 +622,8 @@ function today(): string {
       <p class="doc-foot">
         合计：构件 {{ full.frame.totalQty }} 根 · 备料（含余量）{{ (full.frame.stockLengthMm / 1000).toFixed(3) }}m ·
         净长 {{ (full.frame.rawLengthMm / 1000).toFixed(3) }}m · 绑扎余量合计
-        {{ f1(full.frame.lashExtraMm) }}mm
+        {{ f1(full.frame.lashExtraMm) }}mm · 位置实例 {{ full.positions.instances.length }} 处（含无层无棱档
+        {{ full.positions.bucket.length }} 项）
       </p>
     </section>
 
@@ -633,7 +642,7 @@ function today(): string {
             <div><span>裁切尺寸</span><b>上 {{ f1(p.widthTopMm) }} / 下 {{ f1(p.widthBottomMm) }} × 高 {{ f1(p.heightMm) }} mm</b></div>
             <div><span>缝份</span><b>四边各 {{ p.seamAllowanceMm }}mm（已计入裁切尺寸）</b></div>
             <div>
-              <span>位置 / 配色</span><b>{{ p.layerIndex >= 0 ? `第 ${p.layerIndex + 1} 层` : '顶/底盖' }} · {{ p.color }}</b>
+              <span>位置 / 配色</span><b>{{ panelPositionText(p) }} · {{ p.color }}</b>
             </div>
             <div><span>对位标记</span><b>{{ p.marksMm.length }} 处（见 1:1 图十字编号）</b></div>
           </div>
@@ -1011,11 +1020,28 @@ button.primary:hover {
 }
 
 .doc-meta {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 11.5px;
   color: var(--ink-soft);
   border-bottom: 1px solid var(--line);
   padding-bottom: 8px;
+}
+
+.doc-pos {
+  margin: 0 0 8px;
+  font-size: 10px;
+  color: #8a6d3b;
+  line-height: 1.5;
+}
+
+.doc-pos.stale {
+  color: #8f1c19;
+  font-weight: 700;
+}
+
+.doc-pos-cell {
+  font-size: 10px;
+  color: #4a3a30;
 }
 
 .doc-table {

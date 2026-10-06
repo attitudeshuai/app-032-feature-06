@@ -6,6 +6,7 @@ import type { CheckResult, Lantern } from './types'
 import { bodySurfaceArea, polygonEdge, ringPerimeter, segmentInfos } from './geometry'
 import { buildFrame, type FrameResult } from './frame'
 import { buildPanels, panelNetArea, type PanelResult } from './panels'
+import { buildPositionModel, positionStockRows, POSITION_SCHEME, type PositionModel, type PosStockRow } from './positions'
 import { computeBatch, computeMaterials, type BatchMaterials, type SingleLightMaterials } from './materials'
 import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet } from './paginate'
 import { CRAFT } from './craft'
@@ -16,6 +17,10 @@ export interface FullResult {
   materials: SingleLightMaterials
   batch: BatchMaterials
   sheets: Sheet[]
+  /** 统一位置模型（构件 + 顶盖/底盘裁片）——表、图、备料、导出共用 */
+  positions: PositionModel
+  /** 备料按位置分开（每根/每圈一行） */
+  stockRows: PosStockRow[]
   checks: CheckResult[]
   elapsedMs: number
 }
@@ -30,9 +35,13 @@ export function computeAll(l: Lantern, loft: LoftOptions): FullResult {
   const materials = computeMaterials(l)
   const batch = computeBatch(materials, Math.max(1, Math.round(l.batchCount)), l.wasteRatio)
   const sheets = paginate(l, loft)
+  // 统一位置模型：构件实例 + 顶盖/底盘裁片（方案 A 归无层无棱档），单一来源
+  const caps = panels.panels.filter((p) => p.layerIndex === -1).map((p) => ({ id: p.id, label: p.label, capSide: p.capSide }))
+  const positions = buildPositionModel(l, frame.geometry, frame.members, caps)
+  const stockRows = positionStockRows(frame.members, positions)
   const elapsedMs = performance.now() - t0
-  const checks = runChecks(l, frame, panels, materials, batch, sheets, elapsedMs)
-  return { frame, panels, materials, batch, sheets, checks, elapsedMs }
+  const checks = runChecks(l, frame, panels, materials, batch, sheets, elapsedMs, positions, stockRows)
+  return { frame, panels, materials, batch, sheets, positions, stockRows, checks, elapsedMs }
 }
 
 function runChecks(
@@ -42,7 +51,9 @@ function runChecks(
   materials: SingleLightMaterials,
   batch: BatchMaterials,
   sheets: Sheet[],
-  elapsedMs: number
+  elapsedMs: number,
+  positions: PositionModel,
+  stockRows: PosStockRow[]
 ): CheckResult[] {
   const out: CheckResult[] = []
   const g = frame.geometry
@@ -68,8 +79,16 @@ function runChecks(
     })
   }
 
-  // ---- CHK-02 竖篾长度与分段高度累计 ----
-  {
+  // ---- CHK-02 竖篾长度与分段高度累计（正多面体无竖篈/分层，不适用） ----
+  if (g.kind === 'polyhedron') {
+    out.push({
+      id: 'CHK-02',
+      title: '竖篾净长 = 分段母线折线长累计（正多面体不适用）',
+      pass: true,
+      value: '不适用',
+      detail: '正四面体/八面体为棱篈骨架，无通长竖篈与分层截面；棱长按外接球直径单独核算（见几何手算）。'
+    })
+  } else {
     const segs = segmentInfos(g)
     const sumH = segs.reduce((s, x) => s + x.heightMm, 0)
     const sumSlant = segs.reduce((s, x) => s + x.slantMm, 0)
@@ -187,7 +206,79 @@ function runChecks(
       title: '放样计算 < 100ms',
       pass,
       value: `${elapsedMs.toFixed(1)}ms`,
-      detail: `${l.divisions} 等分 × ${l.layers.length} 层：构件 ${frame.totalQty} 根、裁片 ${panels.totalQty} 块、图纸 ${sheets.length} 页，全流程耗时 ${elapsedMs.toFixed(1)}ms（含分页）`
+      detail: `${l.divisions} 等分 × ${l.layers.length} 层：构件 ${frame.totalQty} 根、裁片 ${panels.totalQty} 块、图纸 ${sheets.length} 页，全流程耗时 ${elapsedMs.toFixed(1)}ms（含分页与位置模型）`
+    })
+  }
+
+  // ---- CHK-09 统一位置：每根构件位置齐全、根数与实例对得上、等分首尾闭合 ----
+  {
+    const problems: string[] = []
+    // 1) 每个构件必须有位置
+    for (const m of frame.members) {
+      if (!m.pos) problems.push(`${m.label} 缺位置`)
+    }
+    // 2) 每个非无档构件的 qty 必须等于其实例数（含顶盖/底盘由裁片侧另算）
+    for (const m of frame.members) {
+      if (m.pos.zone === 'none') continue
+      const cnt = positions.byMember.get(m.id)?.length || 0
+      if (cnt !== m.qty) problems.push(`${m.label} 数量 ${m.qty} ≠ 位置实例 ${cnt}`)
+    }
+    // 3) 棱/母线序号不断号、不重号
+    for (const [mid, arr] of positions.byMember) {
+      const edges = arr.map((x) => x.edgeNo).filter((x): x is number => x != null).sort((a, b) => a - b)
+      for (let i = 0; i < edges.length; i++) {
+        if (edges[i] !== i + 1) {
+          problems.push(`${mid} 棱号断号/重号：${edges.join(',')}`)
+          break
+        }
+      }
+    }
+    // 4) 旋转体：母线根数 = 等分数 = 展开片数
+    if (l.kind === 'revolution') {
+      const rib = frame.members.find((m) => m.kind === 'rib')
+      const sidePanels = panels.panels.filter((p) => p.layerIndex >= 0)
+      const panelQty = sidePanels[0]?.qty || 0
+      if (!rib || rib.qty !== l.divisions) problems.push(`母线篾根数 ${rib?.qty} ≠ 等分数 ${l.divisions}`)
+      if (panelQty !== l.divisions) problems.push(`展开片数 ${panelQty} ≠ 等分数 ${l.divisions}`)
+    }
+    // 5) 位置坐标必须是 mm 整数
+    for (const ins of positions.instances) {
+      const a = ins.anchor
+      if (!Number.isInteger(a.x) || !Number.isInteger(a.y) || !Number.isInteger(a.z)) {
+        problems.push(`${ins.label} 坐标未取整`)
+        break
+      }
+    }
+    // 6) 按位置分列的备料合计必须等于含余量总长（守恒，同一来源）
+    const posStock = stockRows.reduce((s, r) => s + r.lengthMm * r.qty, 0)
+    if (Math.abs(posStock - frame.stockLengthMm) > 0.1) {
+      problems.push(`按位置备料 ${f1(posStock)} ≠ 构件表备料 ${f1(frame.stockLengthMm)}`)
+    }
+    // 7) 无层无棱档内容固定（方案 A）
+    const bucketNames = positions.bucket.map((b) => b.name).join('、')
+    out.push({
+      id: 'CHK-09',
+      title: '统一位置（POS-A1）：表/图/备料/导出/存档同一份位置',
+      pass: problems.length === 0,
+      value: `实例 ${positions.instances.length} 处 · 无层无棱档 ${positions.bucket.length} 项`,
+      detail:
+        problems.length === 0
+          ? `每个构件都有层/棱/圈口位置；旋转体母线根数=等分数=${l.kind === 'revolution' ? l.divisions : '—'}，序号首尾闭合；坐标 mm 取整（界面 cm 保留 1 位）；按位置备料合计 ${f1(posStock)}mm = 构件表合计；无层无棱档：${bucketNames || '（无）'}`
+          : problems.join('；')
+    })
+  }
+
+  // ---- CHK-10 存档位置版本：老位置必须重认后重出 ----
+  {
+    const stale = l.posVersion !== POSITION_SCHEME
+    out.push({
+      id: 'CHK-10',
+      title: '本机存档位置版本（老位置须作废重出）',
+      pass: !stale,
+      value: stale ? '位置待重认' : POSITION_SCHEME,
+      detail: stale
+        ? '此灯样按旧位置方案存档：本机存档位置、已导出的构件清单/裁片清单/备料单与 1:1 放样图全部作废，需重认位置后重出；照旧位置裁好的中轴/顶盖/底盘料退回重新对位。'
+        : `存档位置戳 ${POSITION_SCHEME}，与当前表、图、备料、导出一致。`
     })
   }
 

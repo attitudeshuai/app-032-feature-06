@@ -7,7 +7,7 @@ import { getLantern } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { bodySurfaceArea } from '../core/geometry'
-import { downloadText, panelsCsv, shapeName } from '../core/exporter'
+import { downloadText, panelsCsv, panelPositionText, shapeName } from '../core/exporter'
 import { coveringSpec } from '../core/craft'
 
 const route = useRoute()
@@ -99,6 +99,10 @@ function exportCsv() {
             <tr>
               <td>形状 / 缝份</td>
               <td class="mono">{{ shapeName(p.shape) }} · +{{ p.seamAllowanceMm }}×2</td>
+            </tr>
+            <tr class="pos-row">
+              <td>位置</td>
+              <td class="mono">{{ panelPositionText(p) }}</td>
             </tr>
             <tr v-if="p.radiusMm">
               <td>净半径</td>

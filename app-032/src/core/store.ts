@@ -6,8 +6,11 @@ import { reactive, watch } from 'vue'
 import type { Lantern } from './types'
 import { CRAFT, coveringSpec, presetById, PRESETS } from './craft'
 import { buildGeometry, effectiveHeight, r1 } from './geometry'
+import { POSITION_SCHEME } from './positions'
 
 const KEY = 'lantern-frame-lofting.v1'
+/** 存档版本：位置戳对不上的老灯样一律标「位置待重认」 */
+const STORE_VERSION = 2
 
 interface StoreState {
   lanterns: Lantern[]
@@ -65,11 +68,34 @@ export function createFromPreset(presetId: string): Lantern {
     wasteRatio: coveringSpec(p.covering).wasteRatio,
     pageSize: 'A4',
     overlapMm: CRAFT.defaultOverlapMm,
+    posVersion: POSITION_SCHEME,
     createdAt: now,
     updatedAt: now
   }
   syncLayerDiameters(lantern)
   return lantern
+}
+
+/** 老存档迁移：补齐新字段；位置戳缺失/不符时保留待重认标记（不自动重算位置，避免“静默挪位”） */
+export function migrateLantern(raw: Partial<Lantern>): Lantern {
+  const l = raw as Lantern
+  if (l.posVersion !== POSITION_SCHEME) {
+    // 显式置空：界面据此亮「老位置」横幅，要求重认后重出单子与图纸
+    l.posVersion = ''
+  }
+  return l
+}
+
+/** 该灯样是否还挂着老位置（方案切换前的存档） */
+export function isPositionStale(l: Lantern): boolean {
+  return l.posVersion !== POSITION_SCHEME
+}
+
+/** 重认位置：用当前层/棱参数重算后打上当前方案戳（旧单子与图纸必须据此重出） */
+export function restampPosition(l: Lantern) {
+  syncLayerDiameters(l)
+  l.posVersion = POSITION_SCHEME
+  l.updatedAt = new Date().toISOString()
 }
 
 /** 把轮廓算出的直径写回分段（数据模型 §7 中 layers[].diameterMm） */
@@ -123,7 +149,7 @@ function persistNow() {
   suspendPersist = true
   try {
     for (const l of state.lanterns) syncLayerDiameters(l)
-    localStorage.setItem(KEY, JSON.stringify({ version: 1, lanterns: state.lanterns }))
+    localStorage.setItem(KEY, JSON.stringify({ version: STORE_VERSION, scheme: POSITION_SCHEME, lanterns: state.lanterns }))
     state.storageError = ''
   } catch (e) {
     state.storageError = e instanceof Error ? e.message : String(e)
@@ -146,8 +172,14 @@ export function loadStore() {
   try {
     const raw = localStorage.getItem(KEY)
     if (raw) {
-      const data = JSON.parse(raw) as { lanterns?: Lantern[] }
-      if (Array.isArray(data.lanterns)) state.lanterns = data.lanterns
+      const data = JSON.parse(raw) as { version?: number; lanterns?: Partial<Lantern>[] }
+      if (Array.isArray(data.lanterns)) {
+        // 老存档（v1，无位置方案戳）迁移后保留「位置待重认」标记
+        state.lanterns = data.lanterns.map((x) => migrateLantern(x))
+        if (data.version && data.version >= STORE_VERSION) {
+          // 同版本数据直接用
+        }
+      }
     }
   } catch {
     state.storageError = '本地灯样数据损坏，已重置'

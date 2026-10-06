@@ -12,6 +12,41 @@ export interface Point2 {
   y: number
 }
 
+export interface Point3 {
+  x: number
+  y: number
+  z: number
+}
+
+/**
+ * 位置分区（方案 A：无层无棱构件统一归入显式的「无层无棱档」）。
+ * body=层身段件  mouth=上口圈  base=底盘圈  shoulder=收口肩部支撑圈
+ * spoke=走马灯辐条  none=无层无棱档（中轴、顶盖/底盘裁片）  solid-edge=正多面体棱（不分层）
+ */
+export type PosZone = 'body' | 'mouth' | 'base' | 'shoulder' | 'spoke' | 'none' | 'solid-edge'
+
+/**
+ * 构件在灯体上的位置（表、图、备料、导出、存档共用的同一份位置）。
+ * 层号自底向上 1..L；棱/母线序号 1 起，俯视正上方为 1 号、顺时针递增，末号接 1 号（不断号、不重号）。
+ * 坐标一律 mm 取整；界面换算 cm 时保留 1 位小数。
+ */
+export interface MemberPosition {
+  zone: PosZone
+  /** 层号 1..L；通长件为 null（跨全部层）；底盘圈为 0；上口圈为 L；无层无棱档为 null */
+  layer: number | null
+  /** 棱/母线序号起止；整圈一根（旋转体圈类）为 null */
+  edgeStart: number | null
+  edgeEnd: number | null
+  /** 该位置的根数（必须与 FrameMember.qty 一致） */
+  count: number
+  /** 离底高度（mm，取整）；通长件/无档件省略（null） */
+  yMm?: number | null
+  /** 收口支撑圈等非截面圈的实际半径（mm，取整） */
+  radiusMm?: number
+  /** zone=none 时档内名称，如「中轴（走马灯转轴）」「顶盖圆片」「底盖圆片」 */
+  bucket?: string
+}
+
 /** 分段（层）：高度为准，直径为轮廓派生结果 */
 export interface LayerSpec {
   heightMm: number
@@ -63,6 +98,11 @@ export interface Lantern {
   pageSize: PageSize
   /** 长条图跨页搭接量（mm） */
   overlapMm: number
+  /**
+   * 位置方案版本戳。POS-A1 = 统一无层无棱档方案（中轴/顶盖/底盘归档，不折算到层棱）。
+   * 缺省或版本对不上即视为「老位置」：存档位置、已导出清单与放样图全部作废重出。
+   */
+  posVersion: string
   createdAt: string
   updatedAt: string
 }
@@ -86,6 +126,8 @@ export interface FrameMember {
   group: string
   /** 每根含几处绑扎余量 */
   lashJoints: number
+  /** 统一位置（层/棱/圈口/无层无棱档）——表、图、备料、导出、存档共用 */
+  pos: MemberPosition
   note?: string
 }
 
@@ -118,6 +160,8 @@ export interface Panel {
   polySides?: number
   /** 对应灯体层的索引（-1 表示顶/底盖） */
   layerIndex: number
+  /** 顶/底盖侧（与 layerIndex=-1 配套；方案 A 归「无层无棱档」） */
+  capSide?: 'top' | 'bottom'
   color: string
   note?: string
 }

@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { COVERINGS, PRESETS, coveringLabel, kindLabel, styleLabel } from '../core/craft'
 import { addLantern, createFromPreset, duplicateLantern, removeLantern, state } from '../core/store'
+import { POSITION_SCHEME } from '../core/positions'
 
 const router = useRouter()
 
@@ -85,18 +86,25 @@ function updatedAt(iso: string): string {
             <th>名称</th>
             <th>类别</th>
             <th>尺寸</th>
-            <th>层数 / 棱数</th>
+            <th>层数 / 棱数·等分</th>
+            <th>位置版本</th>
             <th>蒙面</th>
             <th>最近修改</th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="l in lanterns" :key="l.id">
-            <td class="name">{{ l.name }}</td>
+          <tr v-for="l in lanterns" :key="l.id" :class="{ stale: l.posVersion !== POSITION_SCHEME }">
+            <td class="name">
+              {{ l.name }}
+              <span v-if="l.posVersion !== POSITION_SCHEME" class="stale-tag" title="存档位置为老方案，需重认后重出三份单子与放样图">老位置·待重认</span>
+            </td>
             <td>{{ kindLabel(l.kind) }}</td>
             <td class="mono">⌀{{ l.maxDiameterMm }} × H{{ l.totalHeightMm }}</td>
-            <td class="mono">{{ l.layers.length }} 层 / {{ l.sides }} 棱</td>
+            <td class="mono">{{ l.layers.length }} 层 / {{ l.kind === 'revolution' ? l.divisions + ' 等分' : l.sides + ' 棱' }}</td>
+            <td class="mono">
+              <span :class="l.posVersion === POSITION_SCHEME ? 'pos-ok' : 'pos-bad'">{{ l.posVersion === POSITION_SCHEME ? POSITION_SCHEME : '无戳' }}</span>
+            </td>
             <td>{{ coveringLabel(l.covering) }}</td>
             <td class="mono">{{ updatedAt(l.updatedAt) }}</td>
             <td class="ops">
@@ -340,6 +348,33 @@ button.danger:hover {
 
 .name {
   font-weight: 600;
+}
+
+tr.stale {
+  background: #fdf3f2;
+}
+
+.stale-tag {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  background: #b3241f;
+  border-radius: 3px;
+  padding: 1px 5px;
+  vertical-align: middle;
+}
+
+.pos-ok {
+  color: var(--jade);
+  font-size: 11px;
+}
+
+.pos-bad {
+  color: #b3241f;
+  font-weight: 700;
+  font-size: 11px;
 }
 
 .mono {

@@ -6,7 +6,7 @@
  *  - 收口圈弯曲半径由口径与收口段高决定
  * 所有长度单位 mm，面积 mm²，体积 mm³。
  */
-import type { Lantern, Point2 } from './types'
+import type { Lantern, Point2, Point3 } from './types'
 
 export const TAU = Math.PI * 2
 
@@ -218,8 +218,17 @@ export function effectiveHeight(l: Lantern): number {
 export function buildGeometry(l: Lantern): Geometry {
   const h = Math.max(1, effectiveHeight(l))
   const maxR = Math.max(1, l.maxDiameterMm / 2)
-  // 多面体：n 保留 4 / 8 用于区分正四面体与正八面体；其余按棱数/母线根数
-  const n = l.kind === 'polyhedron' ? (Math.round(l.sides) <= 4 ? 4 : 8) : Math.max(3, Math.round(l.sides))
+  // 多面体：n 保留 4 / 8 用于区分正四面体与正八面体；
+  // 旋转体：n = 母线等分数（母线篾根数 = 等分数，展开片数也同此数，首尾闭合）；
+  // 棱柱/方灯：n = 棱数。
+  const n =
+    l.kind === 'polyhedron'
+      ? Math.round(l.sides) <= 4
+        ? 4
+        : 8
+      : l.kind === 'revolution'
+        ? Math.max(3, Math.round(l.divisions))
+        : Math.max(3, Math.round(l.sides))
   const polygon = l.kind === 'prism' || l.kind === 'box'
   const mouthR = l.mouthStyle === 'flat' ? maxR : clamp(l.mouthDiameterMm / 2, 1, maxR)
   const baseR = l.bottomStyle === 'flat' ? maxR : clamp(l.baseDiameterMm / 2, 1, maxR)
@@ -365,4 +374,49 @@ export function polyhedronInfo(g: Geometry): PolyhedronInfo {
     heightMm: 2 * R,
     volumeMm3: (Math.SQRT2 / 3) * edge * edge * edge
   }
+}
+
+export interface SolidEdge3 {
+  /** 棱序号（1 起，绕轴稳定编号） */
+  edgeNo: number
+  a: Point3
+  b: Point3
+}
+
+export interface SolidWireframe {
+  vertices: Point3[]
+  edges: SolidEdge3[]
+}
+
+/**
+ * 正多面体 3D 棱架（单位 mm，坐标取整在渲染侧完成）。
+ * 棱序号 1..E：底/赤道圈闭合在前，再侧棱，绕轴稳定编号不断号；供位置模型与预览共用。
+ */
+export function polyhedronWireframe(g: Geometry): SolidWireframe {
+  const info = polyhedronInfo(g)
+  const R = g.maxR
+  const vertices: Point3[] = []
+  const edges: SolidEdge3[] = []
+  const ang = (k: number, n: number) => -Math.PI / 2 + (TAU * k) / n
+
+  if (info.kind === 'tetra') {
+    // 底面正三角形（y = 0）+ 顶点（y = 棱高）
+    const baseR = (R * 2 * Math.SQRT2) / 3
+    for (let k = 0; k < 3; k++) {
+      vertices.push({ x: baseR * Math.cos(ang(k, 3)), y: 0, z: baseR * Math.sin(ang(k, 3)) })
+    }
+    vertices.push({ x: 0, y: info.heightMm, z: 0 })
+    // 底圈 3 棱（1..3，首尾闭合），再侧棱 3 根（4..6）
+    for (let k = 0; k < 3; k++) edges.push({ edgeNo: k + 1, a: vertices[k], b: vertices[(k + 1) % 3] })
+    for (let k = 0; k < 3; k++) edges.push({ edgeNo: 4 + k, a: vertices[k], b: vertices[3] })
+  } else {
+    // 正八面体：顶 / 底顶点 + 赤道正方形（赤道 4 棱闭合 + 上 4 + 下 4 = 12）
+    vertices.push({ x: 0, y: 2 * R, z: 0 }) // 0 顶
+    for (let k = 0; k < 4; k++) vertices.push({ x: R * Math.cos(ang(k, 4)), y: R, z: R * Math.sin(ang(k, 4)) }) // 1..4 赤道
+    vertices.push({ x: 0, y: 0, z: 0 }) // 5 底
+    for (let k = 0; k < 4; k++) edges.push({ edgeNo: k + 1, a: vertices[1 + k], b: vertices[1 + ((k + 1) % 4)] })
+    for (let k = 0; k < 4; k++) edges.push({ edgeNo: 5 + k, a: vertices[1 + k], b: vertices[0] })
+    for (let k = 0; k < 4; k++) edges.push({ edgeNo: 9 + k, a: vertices[1 + k], b: vertices[5] })
+  }
+  return { vertices, edges }
 }

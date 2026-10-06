@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChecksPanel from '../components/ChecksPanel.vue'
-import { getLantern } from '../core/store'
+import { getLantern, isPositionStale, restampPosition } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
-import { downloadText, materialsCsv } from '../core/exporter'
+import { downloadText, materialsCsv, positionStockCsv } from '../core/exporter'
 import { coveringSpec, CRAFT } from '../core/craft'
 import { panelCutArea } from '../core/panels'
+import { POSITION_POLICY_TEXT } from '../core/positions'
 
 const route = useRoute()
 const router = useRouter()
@@ -17,6 +18,19 @@ const full = computed(() => {
   if (!l) return null
   return computeAll(l, { ...DEFAULT_LOFT_OPTIONS, paper: l.pageSize, overlapMm: l.overlapMm })
 })
+const stale = computed(() => (lantern.value ? isPositionStale(lantern.value) : false))
+const showPosRows = ref(false)
+
+const batchN = computed(() => Math.max(1, Math.round(lantern.value?.batchCount || 1)))
+const waste = computed(() => lantern.value?.wasteRatio || 0)
+/** 按位置分开的批量用量（每根/每圈一行；与构件表、图、存档同一份位置） */
+const posRows = computed(() =>
+  (full.value?.stockRows || []).map((r) => ({
+    ...r,
+    batchLenMm: r.lengthMm * batchN.value * (1 + waste.value)
+  }))
+)
+const posBatchTotal = computed(() => posRows.value.reduce((s, r) => s + r.batchLenMm, 0))
 
 const cov = computed(() => (lantern.value ? coveringSpec(lantern.value.covering) : null))
 
@@ -44,11 +58,33 @@ function exportCsv() {
   if (!l || !full.value) return
   downloadText(`${l.name}-备料单.csv`, materialsCsv(l, full.value.materials, full.value.batch))
 }
+
+function exportStockCsv() {
+  const l = lantern.value
+  if (!l || !full.value) return
+  downloadText(`${l.name}-备料按位置分列.csv`, positionStockCsv(l, full.value.stockRows, batchN.value, waste.value))
+}
+
+function doRestamp() {
+  const l = lantern.value
+  if (!l) return
+  if (window.confirm('重认位置后：此前已导出的三份单子与 1:1 放样图全部作废需重出；已裁好的中轴/顶盖/底盘料退回重新对位。确认重认？')) {
+    restampPosition(l)
+  }
+}
 </script>
 
 <template>
   <div v-if="!lantern || !full || !cov" class="missing">找不到该灯样。<router-link to="/">返回</router-link></div>
   <div v-else class="materials">
+    <section v-if="stale" class="stale-banner">
+      <div>
+        <b>⚠ 此灯样还挂着老位置（无 POS-A1 戳）。</b>
+        按老位置备的料、已导出的备料单/构件清单/裁片清单与放样图全部需重认后重出；已裁好的中轴/顶盖/底盘料退回重新对位。
+      </div>
+      <button class="primary" @click="doRestamp">重认位置并盖戳</button>
+    </section>
+
     <section class="head">
       <div>
         <h2>材料统计与备料单 · {{ lantern.name }}</h2>
@@ -56,8 +92,10 @@ function exportCsv() {
           竹篾按<b>含绑扎余量</b>长度备料；蒙面按<b>含缝份</b>的裁片面积备料；
           批量总量 = 单灯 × 数量 × (1 + 损耗率)。
         </p>
+        <p class="sub policy">{{ POSITION_POLICY_TEXT }} 下表「按位置分开的用量」与构件表行、预览图段、三份导出单子同一套位置。</p>
       </div>
       <div class="ops">
+        <button @click="exportStockCsv">导出按位置分列 CSV</button>
         <button @click="exportCsv">导出备料单 CSV</button>
         <button class="primary" @click="router.push(`/print/${lantern.id}?view=frame`)">打印备料 / 清单</button>
       </div>
@@ -134,6 +172,44 @@ function exportCsv() {
       </div>
     </section>
 
+    <section class="pos-stock">
+      <div class="pos-head">
+        <h3>备料按位置分开（每根/每圈一行，与图、表同一套位置）</h3>
+        <label class="chk"><input type="checkbox" v-model="showPosRows" /> 展开全部 {{ posRows.length }} 行</label>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>位置（层/棱/圈口/档）</th>
+            <th>构件</th>
+            <th>棱/圈序号</th>
+            <th class="num">单根净长 (mm)</th>
+            <th class="num">单根截取 (mm)</th>
+            <th class="num">单根 (cm)</th>
+            <th class="num">批量 {{ batchN }} 个含损耗 (mm)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="(r, i) in showPosRows ? posRows : posRows.slice(0, 12)" :key="i">
+            <td>{{ r.posText }}</td>
+            <td>{{ r.label }}</td>
+            <td class="mono">{{ r.edgeNo == null ? '整圈' : r.edgeNo }}</td>
+            <td class="num mono">{{ r.rawLengthMm.toFixed(1) }}</td>
+            <td class="num mono strong">{{ r.lengthMm.toFixed(1) }}</td>
+            <td class="num mono">{{ (r.lengthMm / 100).toFixed(1) }}</td>
+            <td class="num mono">{{ r.batchLenMm.toFixed(1) }}</td>
+          </tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="6" class="num">合计（批量 {{ batchN }} 个，含 {{ (waste * 100).toFixed(0) }}% 损耗）</td>
+            <td class="num mono strong">{{ posBatchTotal.toFixed(1) }} mm（{{ (posBatchTotal / 1000).toFixed(3) }} m）</td>
+          </tr>
+        </tfoot>
+      </table>
+      <small v-if="!showPosRows && posRows.length > 12" class="more-hint">仅显示前 12 行，勾选展开查看全部 {{ posRows.length }} 处位置；导出 CSV 含全部行。</small>
+    </section>
+
     <section class="palette">
       <h3>分层蒙面用量（按层买布/买纸用）</h3>
       <table>
@@ -167,7 +243,11 @@ function exportCsv() {
       </table>
     </section>
 
-    <ChecksPanel :checks="full.checks" :elapsed-ms="full.elapsedMs" title="全量验收自检（§10）" />
+    <ChecksPanel
+      :checks="full.checks.filter((c) => ['CHK-04', 'CHK-07', 'CHK-09', 'CHK-10'].includes(c.id))"
+      :elapsed-ms="full.elapsedMs"
+      title="备料与统一位置自检"
+    />
   </div>
 </template>
 
@@ -195,10 +275,90 @@ h2 {
 }
 
 .sub {
-  margin: 0;
+  margin: 0 0 4px;
   font-size: 12.5px;
   color: var(--ink-soft);
   max-width: 900px;
+}
+
+.sub.policy {
+  font-size: 11.5px;
+  color: #8a6d3b;
+}
+
+.stale-banner {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  background: #fdecea;
+  border: 1px solid #e3b3ae;
+  color: #8f1c19;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.pos-stock {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.pos-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 6px;
+}
+
+.pos-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.chk {
+  font-size: 12px;
+  color: var(--ink-soft);
+  display: flex;
+  gap: 6px;
+}
+
+.pos-stock table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.pos-stock th {
+  text-align: left;
+  padding: 6px 14px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  font-weight: 500;
+  font-size: 11.5px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.pos-stock td {
+  padding: 5px 14px;
+  border-bottom: 1px dashed var(--line);
+}
+
+.pos-stock tfoot td {
+  background: #fff9ec;
+  font-weight: 600;
+  border-top: 1px solid var(--line);
+}
+
+.more-hint {
+  display: block;
+  padding: 6px 14px 10px;
+  color: var(--ink-soft);
 }
 
 .ops {

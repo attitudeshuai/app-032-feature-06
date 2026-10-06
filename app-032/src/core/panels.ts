@@ -141,10 +141,10 @@ export function buildPanels(l: Lantern): PanelResult {
     })
   })
 
-  // 顶盖 / 底盖
+  // 顶盖 / 底盖（方案 POS-A1：无层无棱档，位置随裁片一起存档/导出）
   const topR = g.sections[g.sections.length - 1].radiusMm
   const botR = g.sections[0].radiusMm
-  const coverPanel = (r: number, label: string, tag: string, color: string) => {
+  const coverPanel = (r: number, label: string, tag: string, color: string, capSide: 'top' | 'bottom') => {
     if (g.polygon) {
       const apothem = r * Math.cos(Math.PI / g.n)
       const rawW = 2 * apothem
@@ -174,8 +174,9 @@ export function buildPanels(l: Lantern): PanelResult {
         radiusMm: r1(r),
         polySides: g.n,
         layerIndex: -1,
+        capSide,
         color,
-        note: `正 ${g.n} 边形裁片，对边距 ${r1(rawW)}mm，四周各加 ${s}mm 折边`
+        note: `正 ${g.n} 边形裁片，对边距 ${r1(rawW)}mm，四周各加 ${s}mm 折边；位置：无层无棱档 · ${tag}`
       })
     } else {
       const cutD = 2 * r + 2 * s
@@ -200,13 +201,14 @@ export function buildPanels(l: Lantern): PanelResult {
         qty: 1,
         radiusMm: r1(r),
         layerIndex: -1,
+        capSide,
         color,
-        note: `圆形裁片，净直径 ${r1(2 * r)}mm，含折边（四周各 ${s}mm）`
+        note: `圆形裁片，净直径 ${r1(2 * r)}mm，含折边（四周各 ${s}mm）；位置：无层无棱档 · ${tag}`
       })
     }
   }
-  coverPanel(topR, '顶盖圆片', '顶盖', l.layerColors[l.layerColors.length - 1] || l.color)
-  coverPanel(botR, '底盖圆片', '底盘', l.layerColors[0] || l.color)
+  coverPanel(topR, '顶盖圆片', '顶盖', l.layerColors[l.layerColors.length - 1] || l.color, 'top')
+  coverPanel(botR, '底盖圆片', '底盘', l.layerColors[0] || l.color, 'bottom')
 
   return finish(g, panels)
 }
